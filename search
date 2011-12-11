@@ -1,0 +1,195 @@
+#!/usr/bin/env python
+"""A very limited 'find | xargs grep' wrapper, to compare it to ack would be
+like comparing ed to vim"""
+import optparse
+import os
+
+
+def std(stream, string, linesep=True):
+    "Writes string to stream, appending os.linesep if asked to. Flushes stream"
+    stream.write(string)
+    if linesep:
+        stream.write(os.linesep)
+    stream.flush()
+
+def out(string, linesep=True):
+    "Calls std with os.sys.stdout"
+    std(os.sys.stdout, string, linesep)
+
+def err(string, linesep=True):
+    "Calls std with os.sys.stderr"
+    std(os.sys.stderr, string, linesep)
+
+def get_options_and_arguments():
+    "Primes and launches the option parser"
+    usage = "%prog [options] PATTERN1 ..."
+    option_parser = optparse.OptionParser(usage=usage)
+
+    option_parser.add_option("-c", "--no-color", dest="color",
+                             help="Colorless output", action="store_false",
+                             default=True),
+    option_parser.add_option("-d", "--directory", dest="directory",
+                             help="Search DIRECTORY instead of current " +
+                             "directory", metavar="DIRECTORY")
+    option_parser.add_option("-D", "--exclude-directories",
+                             dest="exclude_directories",
+                             help="Exclude files in comma-separated list " +
+                             "EXCLUDE-DIRECTORIES",
+                             metavar="EXCLUDE-DIRECTORIES")
+    option_parser.add_option("-n", "--name", dest="name", help="Limits " +
+                             "results to filenames like PATTERN (conflicts " +
+                             "with -e and -N)", metavar="PATTERN")
+    option_parser.add_option("-N", "--exclude-names", dest="exclude_names",
+                             help="Excludes results with filenames like " +
+                             "PATTERN (conflicts with -n)", metavar="PATTERN")
+    option_parser.add_option("-e", "--extension", dest="extension",
+                             help="Limit results to filenames like " +
+                             "*.EXTENSION (conflicts with -n and -E)",
+                             metavar="EXTENSION")
+    option_parser.add_option("-E", "--exclude-extensions",
+                             dest="exclude_extensions", help="Exclude " +
+                             "filenames ending with extensions in " +
+                             "comma-separated list EXCLUDE-EXTENSIONS " +
+                             "(conflicts with -e)",
+                             metavar="EXCLUDE-EXTENSIONS")
+    option_parser.add_option("-i", "--no-case-sensitive",
+                             dest="case_sensitive", help="Case insensitive " +
+                             "search", action="store_false", default=True)
+    option_parser.add_option("-l", "--no-line-number", dest="line_number",
+                             help="Do not output line number for each match",
+                             action="store_false", default=True)
+    option_parser.add_option("-f", "--no-file-name", dest="file_name",
+                             help="Do not output file name for each match " +
+                             "(conflicts with -F)", action="store_false",
+                             default=True)
+    option_parser.add_option("-F", "--file-name-only", dest="file_name_only",
+                             help="Output file names only (conflicts with " +
+                             "-f, implies -c and -l)", action="store_true",
+                             default=False)
+    option_parser.add_option("-z", "--zero", dest="zero", help="Use ASCII " +
+                             "NUL character as the output separator " +
+                             "(implies -F)",
+                             action="store_true", default=False)
+    options, arguments = option_parser.parse_args()
+    if not arguments:
+        option_parser.print_help()
+        os.sys.exit(3)
+    return options, arguments
+
+def validate(options):
+    "Validates user options, sets implied options"
+    if options.zero and not options.file_name:
+        err("Cannot combine -z and -F")
+        os.sys.exit(4)
+    if options.file_name_only and not options.file_name:
+        err("Cannot combine -f and -F")
+        os.sys.exit(5)
+    if options.exclude_extensions and options.extension:
+        err("Cannot combine -e and -E")
+        os.sys.exit(6)
+    if options.exclude_names and options.name:
+        err("Cannot combine -n and -N")
+        os.sys.exit(7)
+    if options.extension and options.name:
+        err("Cannot combine -e and -n")
+        os.sys.exit(8)
+    if options.directory and not os.path.isdir(options.directory):
+        err("'%s' is not a directory" % options.directory)
+        os.sys.exit(9)
+
+def get_xargs_command(options, arguments):
+    "Prepares grep options and colors, sets implied options"
+    grep_options = []
+    if options.zero:
+        options.file_name_only = True
+        grep_options.append("Z")
+    if options.file_name_only:
+        options.color = False
+        options.line_number = False
+        grep_options.append("l")
+    if options.color:
+        grep_color = "always"
+    else:
+        grep_color = "never"
+    grep_color = " --color=%s" % grep_color
+    if not options.case_sensitive:
+        grep_options.append("i")
+    if options.line_number:
+        grep_options.append("n")
+    if options.file_name:
+        grep_options.append("H")
+    else:
+        if not options.file_name_only:
+            grep_options.append("h")
+    if grep_options:
+        grep_options = " -%s" % "".join(grep_options)
+    else:
+        grep_options = ""
+    pattern_options = []
+    for argument in arguments:
+        pattern_options.append(" -e '%s'" % argument)
+    pattern_options = "".join(pattern_options)
+    xargs_format = "xargs -r0 grep -I%s%s%s"
+    xargs_command = xargs_format % (grep_color, grep_options, pattern_options)
+    return xargs_command
+
+def get_find_command(options):
+    "Prepares find options, sets implied options"
+    find_path = ""
+    if options.directory:
+        find_path = " '%s'" % options.directory
+    find_name = ""
+    if options.extension:
+        strings = os.path.extsep, options.extension
+        find_name = " -name '*%s%s'" % strings
+    elif options.name:
+        find_name = " -name '%s'" % options.name
+    if options.exclude_names:
+        if find_name:
+            find_name = "%s -and" % find_name
+        strings = find_name, options.exclude_names
+        find_name = "%s -not -name '%s'" % strings
+    if options.exclude_extensions:
+        find_names = []
+        if find_name:
+            find_names.append(find_name)
+        prefix = ""
+        for extension in options.exclude_extensions.split(","):
+            strings = prefix, os.path.extsep, extension
+            find_names.append("%s -not -name '*%s%s'" % strings)
+            if not prefix:
+                prefix = " -and"
+        find_name = "".join(find_names)
+    directories = [
+        "debug",
+        "icons",
+        "images",
+        "release",
+        "stpub",
+        ".svn",
+        "translations",
+        "userguide"
+    ]
+    if options.exclude_directories:
+        directories.extend(options.exclude_directories.split(","))
+    exclude_directories = []
+    for directory in directories:
+        strings = os.path.sep, directory, os.path.sep
+        exclude_directories.append(" -not -path '*%s%s%s*'" % strings)
+    find_args = find_path, find_name, "".join(exclude_directories)
+    find_command = "find%s%s -type f%s -print0" % find_args
+    return find_command
+
+def main():
+    "Main entry point, does everything"
+    options, arguments = get_options_and_arguments()
+    validate(options)
+    xargs_command = get_xargs_command(options, arguments)
+    find_command = get_find_command(options)
+    commands = find_command, xargs_command
+    status = os.system("%s | %s" % commands)
+    os.sys.exit(status)
+
+
+if "__main__" == __name__:
+    main()
